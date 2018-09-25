@@ -1008,7 +1008,10 @@ struct rq {
 	 */
 	unsigned int		nr_uninterruptible;
 
-	struct task_struct __rcu	*curr_exec;
+	struct task_struct __rcu	*curr_exec; /* Execution context */
+#ifdef CONFIG_PROXY_EXEC
+	struct task_struct __rcu	*curr_sched; /* Scheduling context (policy) */
+#endif
 	struct task_struct	*idle;
 	struct task_struct	*stop;
 	unsigned long		next_balance;
@@ -1229,6 +1232,37 @@ static inline void rq_set_curr_rcu_init(struct rq *rq, struct task_struct *task)
 {
 	RCU_INIT_POINTER(rq->curr_exec, task);
 }
+
+#ifdef CONFIG_PROXY_EXEC
+static inline struct task_struct *rq_selected(struct rq *rq)
+{
+	return rq->curr_sched;
+}
+
+static inline struct task_struct *rq_selected_rcu(struct rq *rq)
+{
+	return rcu_dereference(rq->curr_sched);
+}
+
+static inline struct task_struct *rq_selected_once(struct rq *rq)
+{
+	return READ_ONCE(rq->curr_sched);
+}
+
+static inline void rq_set_selected(struct rq *rq, struct task_struct *t)
+{
+	rcu_assign_pointer(rq->curr_sched, t);
+}
+
+#else
+#define rq_selected(x)		(rq_curr(x))
+#define rq_selected_rcu(x)		(rq_curr_rcu(x))
+#define rq_selected_once(x)	(rq_curr_once(x))
+static inline void rq_set_selected(struct rq *rq, struct task_struct *t)
+{
+	/* Do nothing */
+}
+#endif
 
 #define cpu_rq(cpu)		(&per_cpu(runqueues, (cpu)))
 #define this_rq()		this_cpu_ptr(&runqueues)
@@ -2102,9 +2136,23 @@ static inline u64 global_rt_runtime(void)
 	return (u64)sysctl_sched_rt_runtime * NSEC_PER_USEC;
 }
 
+/*
+ * Is p the current execution context?
+ */
 static inline int task_current(struct rq *rq, struct task_struct *p)
 {
 	return rq_curr(rq) == p;
+}
+
+/*
+ * Is p the current scheduling context?
+ *
+ * Note that it might be the current execution context at the same time if
+ * rq_curr() == rq_selected() == p.
+ */
+static inline int task_current_selected(struct rq *rq, struct task_struct *p)
+{
+	return rq_selected(rq) == p;
 }
 
 static inline int task_on_cpu(struct rq *rq, struct task_struct *p)
@@ -2264,7 +2312,7 @@ struct sched_class {
 
 static inline void put_prev_task(struct rq *rq, struct task_struct *prev)
 {
-	WARN_ON_ONCE(rq_curr(rq) != prev);
+	WARN_ON_ONCE(rq_selected(rq) != prev);
 	prev->sched_class->put_prev_task(rq, prev);
 }
 
@@ -2345,6 +2393,16 @@ extern void set_cpus_allowed_common(struct task_struct *p, struct affinity_conte
 
 static inline struct task_struct *get_push_task(struct rq *rq)
 {
+	/*
+	 * XXX connoro: should this be rq_selected?
+	 * When rq_curr() != rq_selected(), pushing rq_curr() alone means it
+	 * stops inheriting. Perhaps returning rq_selected() and pushing the
+	 * entire chain would be correct? OTOH if we are guaranteed that
+	 * rq_selected() is the highest prio task on the rq when
+	 * get_push_task() is called, then proxy() will migrate the rest of the
+	 * chain during the __schedule() call immediately after rq_curr() is
+	 * pushed.
+	 */
 	struct task_struct *p = rq_curr(rq);
 
 	lockdep_assert_rq_held(rq);
