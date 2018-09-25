@@ -1008,7 +1008,17 @@ struct rq {
 	 */
 	unsigned int		nr_uninterruptible;
 
-	struct task_struct __rcu	*curr_exec;
+	/*
+	 * XXX jstultz: Personally, I feel like these should be switched.
+	 * Where rq_curr() returns the selected scheduler context, and
+	 * but rq_proxy() returns the execution context we're going to
+	 * run on behalf of the selected task. But for now keeping it
+	 * the same.
+	 */
+	struct task_struct __rcu	*curr_exec; /* Execution context */
+#ifdef CONFIG_PROXY_EXEC
+	struct task_struct __rcu	*curr_sched; /* Scheduling context (policy) */
+#endif
 	struct task_struct	*idle;
 	struct task_struct	*stop;
 	unsigned long		next_balance;
@@ -1225,6 +1235,38 @@ static inline void rq_set_curr_rcu_init(struct rq *rq, struct task_struct *task)
 {
 	RCU_INIT_POINTER(rq->curr_exec, task);
 }
+
+#ifdef CONFIG_PROXY_EXEC
+static inline struct task_struct *rq_proxy(struct rq *rq)
+{
+	return rq->curr_sched;
+}
+
+static inline struct task_struct *rq_proxy_unlocked(struct rq *rq)
+{
+	return rcu_dereference(rq->curr_sched);
+}
+
+static inline void rq_set_proxy(struct rq *rq, struct task_struct *t)
+{
+	rcu_assign_pointer(rq->curr_sched, t);
+}
+#else
+static inline struct task_struct *rq_proxy(struct rq *rq)
+{
+	return rq->curr_exec;
+}
+
+static inline struct task_struct *rq_proxy_unlocked(struct rq *rq)
+{
+	return rcu_dereference(rq->curr_exec);
+}
+
+static inline void rq_set_proxy(struct rq *rq, struct task_struct *t)
+{
+	/* Do nothing */
+}
+#endif
 
 #define cpu_rq(cpu)		(&per_cpu(runqueues, (cpu)))
 #define this_rq()		this_cpu_ptr(&runqueues)
@@ -2098,9 +2140,23 @@ static inline u64 global_rt_runtime(void)
 	return (u64)sysctl_sched_rt_runtime * NSEC_PER_USEC;
 }
 
+/*
+ * Is p the current execution context?
+ */
 static inline int task_current(struct rq *rq, struct task_struct *p)
 {
 	return rq_curr(rq) == p;
+}
+
+/*
+ * Is p the current scheduling context?
+ *
+ * Note that it might be the current execution context at the same time if
+ * rq->curr == rq->proxy == p.
+ */
+static inline int task_current_proxy(struct rq *rq, struct task_struct *p)
+{
+	return rq_proxy(rq) == p;
 }
 
 static inline int task_on_cpu(struct rq *rq, struct task_struct *p)
@@ -2260,7 +2316,7 @@ struct sched_class {
 
 static inline void put_prev_task(struct rq *rq, struct task_struct *prev)
 {
-	WARN_ON_ONCE(rq_curr(rq) != prev);
+	WARN_ON_ONCE(rq_proxy(rq) != prev);
 	prev->sched_class->put_prev_task(rq, prev);
 }
 
@@ -2341,6 +2397,15 @@ extern void set_cpus_allowed_common(struct task_struct *p, struct affinity_conte
 
 static inline struct task_struct *get_push_task(struct rq *rq)
 {
+	/*
+	 * XXX connoro: should this be rq->proxy? When rq->curr != rq->proxy,
+	 * pushing rq->curr alone means it stops inheriting. Perhaps returning
+	 * rq->proxy and pushing the entire chain would be correct? OTOH if we
+	 * are guaranteed that rq->proxy is the highest prio task on the rq when
+	 * get_push_task() is called, then proxy() will migrate the rest of the
+	 * chain during the __schedule() call immediately after rq->curr is
+	 * pushed.
+	 */
 	struct task_struct *p = rq_curr(rq);
 
 	lockdep_assert_rq_held(rq);

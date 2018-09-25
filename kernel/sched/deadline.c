@@ -1179,7 +1179,7 @@ static enum hrtimer_restart dl_task_timer(struct hrtimer *timer)
 #endif
 
 	enqueue_task_dl(rq, p, ENQUEUE_REPLENISH);
-	if (dl_task(rq_curr(rq)))
+	if (dl_task(rq_proxy(rq)))
 		check_preempt_curr_dl(rq, p, 0);
 	else
 		resched_curr(rq);
@@ -1306,7 +1306,7 @@ static u64 grub_reclaim(u64 delta, struct rq *rq, struct sched_dl_entity *dl_se)
  */
 static void update_curr_dl(struct rq *rq)
 {
-	struct task_struct *curr = rq_curr(rq);
+	struct task_struct *curr = rq_proxy(rq);
 	struct sched_dl_entity *dl_se = &curr->dl;
 	s64 delta_exec, scaled_delta_exec;
 	int cpu = cpu_of(rq);
@@ -1819,7 +1819,7 @@ static int find_later_rq(struct task_struct *task);
 static int
 select_task_rq_dl(struct task_struct *p, int cpu, int flags)
 {
-	struct task_struct *curr;
+	struct task_struct *curr, *proxy;
 	bool select_rq;
 	struct rq *rq;
 
@@ -1830,6 +1830,7 @@ select_task_rq_dl(struct task_struct *p, int cpu, int flags)
 
 	rcu_read_lock();
 	curr = rq_curr_unlocked(rq); /* XXX jstultz: using rcu_dereference intead of READ_ONCE */
+	proxy = rq_proxy_unlocked(rq);
 
 	/*
 	 * If we are dealing with a -deadline task, we must
@@ -1840,9 +1841,9 @@ select_task_rq_dl(struct task_struct *p, int cpu, int flags)
 	 * other hand, if it has a shorter deadline, we
 	 * try to make it stay here, it might be important.
 	 */
-	select_rq = unlikely(dl_task(curr)) &&
+	select_rq = unlikely(dl_task(proxy)) &&
 		    (curr->nr_cpus_allowed < 2 ||
-		     !dl_entity_preempt(&p->dl, &curr->dl)) &&
+		     !dl_entity_preempt(&p->dl, &proxy->dl)) &&
 		    p->nr_cpus_allowed > 1;
 
 	/*
@@ -1905,7 +1906,7 @@ static void check_preempt_equal_dl(struct rq *rq, struct task_struct *p)
 	 * let's hope p can move out.
 	 */
 	if (rq_curr(rq)->nr_cpus_allowed == 1 ||
-	    !cpudl_find(&rq->rd->cpudl, rq_curr(rq), NULL))
+	    !cpudl_find(&rq->rd->cpudl, rq_proxy(rq), NULL))
 		return;
 
 	/*
@@ -1944,7 +1945,7 @@ static int balance_dl(struct rq *rq, struct task_struct *p, struct rq_flags *rf)
 static void check_preempt_curr_dl(struct rq *rq, struct task_struct *p,
 				  int flags)
 {
-	if (dl_entity_preempt(&p->dl, &rq_curr(rq)->dl)) {
+	if (dl_entity_preempt(&p->dl, &rq_proxy(rq)->dl)) {
 		resched_curr(rq);
 		return;
 	}
@@ -1954,7 +1955,7 @@ static void check_preempt_curr_dl(struct rq *rq, struct task_struct *p,
 	 * In the unlikely case current and p have the same deadline
 	 * let us try to decide what's the best thing to do...
 	 */
-	if ((p->dl.deadline == rq_curr(rq)->dl.deadline) &&
+	if ((p->dl.deadline == rq_proxy(rq)->dl.deadline) &&
 	    !test_tsk_need_resched(rq_curr(rq)))
 		check_preempt_equal_dl(rq, p);
 #endif /* CONFIG_SMP */
@@ -1989,7 +1990,7 @@ static void set_next_task_dl(struct rq *rq, struct task_struct *p, bool first)
 	if (hrtick_enabled_dl(rq))
 		start_hrtick_dl(rq, p);
 
-	if (rq_curr(rq)->sched_class != &dl_sched_class)
+	if (rq_proxy(rq)->sched_class != &dl_sched_class)
 		update_dl_rq_load_avg(rq_clock_pelt(rq), rq, 0);
 
 	deadline_queue_push_tasks(rq);
@@ -2305,8 +2306,8 @@ retry:
 	 * can move away, it makes sense to just reschedule
 	 * without going further in pushing next_task.
 	 */
-	if (dl_task(rq_curr(rq)) &&
-	    dl_time_before(next_task->dl.deadline, rq_curr(rq)->dl.deadline) &&
+	if (dl_task(rq_proxy(rq)) &&
+	    dl_time_before(next_task->dl.deadline, rq_proxy(rq)->dl.deadline) &&
 	    rq_curr(rq)->nr_cpus_allowed > 1) {
 		resched_curr(rq);
 		return 0;
@@ -2322,6 +2323,7 @@ retry:
 	get_task_struct(next_task);
 
 	/* Will lock the rq it'll find */
+	/* XXX connoro: update find_lock_later_rq() for split context? */
 	later_rq = find_lock_later_rq(next_task, rq);
 	if (!later_rq) {
 		struct task_struct *task;
@@ -2431,7 +2433,7 @@ static void pull_dl_task(struct rq *this_rq)
 			 * deadline than the current task of its runqueue.
 			 */
 			if (dl_time_before(p->dl.deadline,
-					   rq_curr(src_rq)->dl.deadline))
+					   rq_proxy(src_rq)->dl.deadline))
 				goto skip;
 
 			if (is_migration_disabled(p)) {
@@ -2470,9 +2472,9 @@ static void task_woken_dl(struct rq *rq, struct task_struct *p)
 	if (!task_on_cpu(rq, p) &&
 	    !test_tsk_need_resched(rq_curr(rq)) &&
 	    p->nr_cpus_allowed > 1 &&
-	    dl_task(rq_curr(rq)) &&
+	    dl_task(rq_proxy(rq)) &&
 	    (rq_curr(rq)->nr_cpus_allowed < 2 ||
-	     !dl_entity_preempt(&p->dl, &rq_curr(rq)->dl))) {
+	     !dl_entity_preempt(&p->dl, &rq_proxy(rq)->dl))) {
 		push_dl_tasks(rq);
 	}
 }
@@ -2635,12 +2637,12 @@ static void switched_to_dl(struct rq *rq, struct task_struct *p)
 		return;
 	}
 
-	if (rq_curr(rq) != p) {
+	if (rq_proxy(rq) != p) {
 #ifdef CONFIG_SMP
 		if (p->nr_cpus_allowed > 1 && rq->dl.overloaded)
 			deadline_queue_push_tasks(rq);
 #endif
-		if (dl_task(rq_curr(rq)))
+		if (dl_task(rq_proxy(rq)))
 			check_preempt_curr_dl(rq, p, 0);
 		else
 			resched_curr(rq);
@@ -2669,7 +2671,7 @@ static void prio_changed_dl(struct rq *rq, struct task_struct *p,
 	if (!rq->dl.overloaded)
 		deadline_queue_pull_task(rq);
 
-	if (task_current(rq, p)) {
+	if (task_current_proxy(rq, p)) {
 		/*
 		 * If we now have a earlier deadline task than p,
 		 * then reschedule, provided p is still on this
