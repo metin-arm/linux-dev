@@ -2239,6 +2239,25 @@ static inline int rwlock_needbreak(rwlock_t *lock)
 #endif
 }
 
+static inline void set_task_blocked_on(struct task_struct *p, struct mutex *m)
+{
+	lockdep_assert_held(&p->blocked_lock);
+
+	p->blocked_on = m;
+}
+
+static inline struct mutex *get_task_blocked_on(struct task_struct *p)
+{
+	lockdep_assert_held(&p->blocked_lock);
+
+	return p->blocked_on;
+}
+
+static inline struct mutex *get_task_blocked_on_once(struct task_struct *p)
+{
+	return READ_ONCE(p->blocked_on);
+}
+
 static __always_inline bool need_resched(void)
 {
 	return unlikely(tif_need_resched());

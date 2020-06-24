@@ -3942,7 +3942,7 @@ bool ttwu_proxy_skip_wakeup(struct rq *rq, struct task_struct *p)
 
 		raw_spin_lock(&p->blocked_lock);
 		if (task_is_blocked(p) && __mutex_owner(p->blocked_on) == p)
-			p->blocked_on = NULL;
+			set_task_blocked_on(p, NULL);
 		if (!task_is_blocked(p))
 			ret = false;
 		raw_spin_unlock(&p->blocked_lock);
@@ -3966,7 +3966,7 @@ bool ttwu_proxy_skip_wakeup(struct rq *rq, struct task_struct *p)
 			return true;
 		}
 
-		p->blocked_on = NULL;
+		set_task_blocked_on(p, NULL);
 		if (!cpumask_test_cpu(cpu_of(rq), p->cpus_ptr)) {
 			/*
 			 * proxy stuff moved us outside of the affinity mask
