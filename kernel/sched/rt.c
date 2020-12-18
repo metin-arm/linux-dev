@@ -1537,9 +1537,21 @@ enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 
 	enqueue_rt_entity(rt_se, flags);
 
-	if (!task_current(rq, p) && p->nr_cpus_allowed > 1 &&
-	    !task_is_blocked(p))
-		enqueue_pushable_task(rq, p);
+	/*
+	 * Current can't be pushed away. Proxy is tied to current, so don't
+	 * push it either.
+	 */
+	if (task_current(rq, p) || task_current_selected(rq, p))
+		return;
+
+	/*
+	 * Pinned tasks can't be pushed.
+	 * Affinity of blocked tasks doesn't matter.
+	 */
+	if (!task_is_blocked(p) && p->nr_cpus_allowed == 1)
+		return;
+
+	enqueue_pushable_task(rq, p);
 }
 
 static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
@@ -1828,9 +1840,9 @@ static void put_prev_task_rt(struct rq *rq, struct task_struct *p)
 
 	/*
 	 * The previous task needs to be made eligible for pushing
-	 * if it is still active
+	 * if it is still active. Affinity of blocked task doesn't matter.
 	 */
-	if (on_rt_rq(&p->rt) && p->nr_cpus_allowed > 1)
+	if (on_rt_rq(&p->rt) && (p->nr_cpus_allowed > 1 || task_is_blocked(p)))
 		enqueue_pushable_task(rq, p);
 }
 
