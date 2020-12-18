@@ -7062,12 +7062,28 @@ proxy(struct rq *rq, struct task_struct *next, struct rq_flags *rf)
 	WARN_ON_ONCE(!owner->on_rq);
 	return owner;
 }
+
+static inline void proxy_tag_curr(struct rq *rq, struct task_struct *next)
+{
+	/*
+	 * pick_next_task() calls set_next_task() on the proxy at some
+	 * point, which ensures it is not push/pullable. However, the
+	 * proxy *and* the owner form an atomic pair wrt push/pull.
+	 *
+	 * Make sure owner is not pushable. Unfortunately we can only
+	 * deal with that by means of a dequeue/enqueue cycle. :-/
+	 */
+	dequeue_task(rq, next, DEQUEUE_NOCLOCK | DEQUEUE_SAVE);
+	enqueue_task(rq, next, ENQUEUE_NOCLOCK | ENQUEUE_RESTORE);
+}
 #else /* PROXY_EXEC */
 static struct task_struct *
 proxy(struct rq *rq, struct task_struct *next, struct rq_flags *rf)
 {
 	return next;
 }
+
+static inline void proxy_tag_curr(struct rq *rq, struct task_struct *next) { }
 #endif /* PROXY_EXEC */
 
 /*
@@ -7116,6 +7132,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 	unsigned long prev_state;
 	struct rq_flags rf;
 	struct rq *rq;
+	bool proxied;
 	int cpu;
 	bool preserve_need_resched = false;
 
@@ -7189,20 +7206,11 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 				atomic_inc(&rq->nr_iowait);
 				delayacct_blkio_start();
 			}
-		} else {
-			/*
-			 * XXX
-			 * Let's make this task, which is blocked on
-			 * a mutex, (push/pull)able (RT/DL).
-			 * Unfortunately we can only deal with that by
-			 * means of a dequeue/enqueue cycle. :-/
-			 */
-			dequeue_task(rq, prev, 0);
-			enqueue_task(rq, prev, 0);
 		}
 		switch_count = &prev->nvcsw;
 	}
 
+	proxied = !!prev->blocked_proxy;
 pick_again:
 	/*
 	 * If picked task is actually blocked it means that it can act as a
@@ -7244,6 +7252,10 @@ pick_again:
 		 * changes to task_struct made by pick_next_task().
 		 */
 		rq_set_curr_rcu_init(rq, next);
+
+		if (unlikely(!task_current_proxy(rq, next)))
+			proxy_tag_curr(rq, next);
+
 		/*
 		 * The membarrier system call requires each architecture
 		 * to have a full memory barrier after updating
@@ -7268,6 +7280,10 @@ pick_again:
 		/* Also unlocks the rq: */
 		rq = context_switch(rq, prev, next, &rf);
 	} else {
+		/* In case next was already curr but just got blocked_proxy */
+		if (unlikely(!proxied && next->blocked_proxy))
+			proxy_tag_curr(rq, next);
+
 		rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
 
 		rq_unpin_lock(rq, &rf);
