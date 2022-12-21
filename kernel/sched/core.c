@@ -2495,6 +2495,10 @@ out:
 
 int push_cpu_stop(void *arg)
 {
+	/* XXX connoro: how do we handle this case when the rq->curr we push away
+	 * is part of a proxy chain!?
+	 * we actually push the old rq->proxy and its blocker chain.
+	 */
 	struct rq *lowest_rq = NULL, *rq = this_rq();
 	struct task_struct *p = arg;
 
@@ -2519,9 +2523,7 @@ int push_cpu_stop(void *arg)
 
 	// XXX validate p is still the highest prio task
 	if (task_rq(p) == rq) {
-		deactivate_task(rq, p, 0);
-		set_task_cpu(p, lowest_rq->cpu);
-		activate_task(lowest_rq, p, 0);
+		push_task_chain(rq, lowest_rq, p);
 		resched_curr(lowest_rq);
 	}
 
@@ -7271,7 +7273,7 @@ pick_again:
 		 */
 		rq_set_curr_rcu_init(rq, next);
 
-		if (unlikely(!task_current_proxy(rq, next)))
+		if (unlikely(!task_current_selected(rq, next)))
 			proxy_tag_curr(rq, next);
 
 		/*
