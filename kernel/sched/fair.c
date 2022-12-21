@@ -8449,6 +8449,11 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 
 	lockdep_assert_rq_held(env->src_rq);
 
+	/*
+	 * XXX connoro: Is this correct, or should we be doing chain
+	 * balancing for CFS tasks too? Balancing chains that aren't
+	 * part of the running task's blocked "tree" seems reasonable?
+	 */
 	if (task_is_blocked(p))
 		return 0;
 

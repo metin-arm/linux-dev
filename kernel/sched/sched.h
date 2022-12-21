@@ -2425,7 +2425,7 @@ static inline struct task_struct *get_push_task(struct rq *rq)
 	 * chain during the __schedule() call immediately after rq->curr is
 	 * pushed.
 	 */
-	struct task_struct *p = rq_curr(rq);
+	struct task_struct *p = rq_proxy(rq);
 
 	lockdep_assert_rq_held(rq);
 
@@ -3410,6 +3410,154 @@ static inline void switch_mm_cid(struct task_struct *prev, struct task_struct *n
 
 #else
 static inline void switch_mm_cid(struct task_struct *prev, struct task_struct *next) { }
+#endif
+
+#ifdef CONFIG_SMP
+
+static inline bool task_queued_on_rq(struct rq *rq, struct task_struct *task)
+{
+	if (!task_on_rq_queued(task))
+		return false;
+	smp_rmb();
+	if (task_rq(task) != rq)
+		return false;
+	smp_rmb();
+	if (!task_on_rq_queued(task))
+		return false;
+	return true;
+}
+
+static inline void push_task_chain(struct rq *rq, struct rq *dst_rq, struct task_struct *task)
+{
+	struct task_struct *owner;
+
+	lockdep_assert_rq_held(rq);
+	lockdep_assert_rq_held(dst_rq);
+
+	BUG_ON(!task_queued_on_rq(rq, task));
+	BUG_ON(task_current_proxy(rq, task));
+
+	for (; task != NULL; task = owner) {
+		/*
+		 * XXX connoro: note that if task is currently in the process of migrating to
+		 * rq (but not yet enqueued since we hold the rq lock) then we stop only after
+		 * pushing all the preceding tasks. This isn't ideal (the pushed chain will
+		 * probably get sent back as soon as it's picked on dst_rq) but short of holding
+		 * all of the rq locks while balancing, I don't see how we can avoid this, and
+		 * some extra migrations are clearly better than trying to dequeue task from rq
+		 * before it's ever enqueued here.
+		 *
+		 * XXX connoro: catastrophic race when task is dequeued on rq to start and then
+		 * wakes on another rq in between the two checks.
+		 * There's probably a better way than the below though...
+		 */
+		if (!task_queued_on_rq(rq, task) || task_current_proxy(rq, task))
+			break;
+
+		if (task_is_blocked(task)) {
+			owner = mutex_owner(task->blocked_on);
+		} else {
+			owner = NULL;
+		}
+		deactivate_task(rq, task, 0);
+		set_task_cpu(task, dst_rq->cpu);
+		activate_task(dst_rq, task, 0);
+		if (task == owner)
+			break;
+	}
+}
+
+/*
+ * Returns the unblocked task at the end of the blocked chain starting with p
+ * if that chain is composed entirely of tasks enqueued on rq, or NULL otherwise.
+ */
+static inline struct task_struct *find_exec_ctx(struct rq *rq, struct task_struct *p)
+{
+	struct task_struct *exec_ctx, *owner;
+	struct mutex *mutex;
+
+	lockdep_assert_rq_held(rq);
+
+	/*
+	 * XXX connoro: I *think* we have to return rq->curr if it occurs anywhere in the chain
+	 * to avoid races in certain scenarios where rq->curr has just blocked but can't
+	 * switch out until we release its rq lock.
+	 * Should the check be task_on_cpu() instead? Does it matter? I don't think this
+	 * gets called while context switch is actually ongoing which IIUC is where this would
+	 * make a difference...
+	 * correction: it can get called from finish_task_switch apparently. Unless that's wrong;
+	 * double check.
+	 */
+	for (exec_ctx = p; task_is_blocked(exec_ctx) && !task_on_cpu(rq, exec_ctx);
+							exec_ctx = owner) {
+		mutex = exec_ctx->blocked_on;
+		owner = mutex_owner(mutex);
+		if (owner == exec_ctx)
+			break;
+
+		/*
+		 * XXX connoro: can we race here if owner is migrating to rq?
+		 * owner has to be dequeued from its old rq before set_task_cpu
+		 * is called, and we hold this rq's lock so it can't be
+		 * enqueued here yet...right?
+		 *
+		 * Also if owner is dequeued we can race with its wakeup on another
+		 * CPU...at which point all hell will break loose potentially...
+		 */
+		if (!task_queued_on_rq(rq, owner) || task_current_proxy(rq, owner)) {
+			exec_ctx = NULL;
+			break;
+		}
+	}
+	return exec_ctx;
+}
+
+
+/*
+ * Returns:
+ * 1 if chain is pushable and affinity does not prevent pushing to cpu
+ * 0 if chain is unpushable
+ * -1 if chain is pushable but affinity blocks running on cpu.
+ * XXX connoro: maybe there's a cleaner way to do this...
+ */
+static inline int pushable_chain(struct rq *rq, struct task_struct *p, int cpu)
+{
+	struct task_struct *exec_ctx;
+
+	lockdep_assert_rq_held(rq);
+
+	/*
+	 * XXX connoro: 2 issues combine here:
+	 * 1) we apparently have some stuff on the pushable list after it's
+	 *    dequeued from the rq
+	 * 2) This check can race with migration/wakeup if p was already dequeued
+	 *    when we got the rq lock...
+	 */
+	if (task_rq(p) != rq || !task_on_rq_queued(p))
+		return 0;
+
+	exec_ctx = find_exec_ctx(rq, p);
+	/*
+	 * Chain leads off the rq, we're free to push it anywhere.
+	 *
+	 * One wrinkle with relying on find_exec_ctx is that when the chain
+	 * leads to a task currently migrating to rq, we see the chain as
+	 * pushable & push everything prior to the migrating task. Even if
+	 * we checked explicitly for this case, we could still race with a
+	 * migration after the check.
+	 * This shouldn't permanently produce a bad state though, as proxy()
+	 * will send the chain back to rq and by that point the migration
+	 * should be complete & a proper push can occur.
+	 */
+	if (!exec_ctx)
+		return 1;
+
+	if (task_on_cpu(rq, exec_ctx) || exec_ctx->nr_cpus_allowed <= 1)
+		return 0;
+
+	return cpumask_test_cpu(cpu, &exec_ctx->cpus_mask) ? 1 : -1;
+}
+
 #endif
 
 #endif /* _KERNEL_SCHED_SCHED_H */
