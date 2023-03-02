@@ -1008,7 +1008,7 @@ struct rq {
 	 */
 	unsigned int		nr_uninterruptible;
 
-	struct task_struct __rcu	*curr;
+	struct task_struct __rcu	*curr_exec;
 	struct task_struct	*idle;
 	struct task_struct	*stop;
 	unsigned long		next_balance;
@@ -1201,11 +1201,41 @@ static inline bool is_migration_disabled(struct task_struct *p)
 
 DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
+static inline struct task_struct *rq_curr(struct rq *rq)
+{
+	return rq->curr_exec;
+}
+
+/* XXX jstultz: Would rq_curr_rcu() be a better name? */
+static inline struct task_struct *rq_curr_unlocked(struct rq *rq)
+{
+	return rcu_dereference(rq->curr_exec);
+}
+
+static inline void rq_set_curr(struct rq *rq, struct task_struct *task)
+{
+	rcu_assign_pointer(rq->curr_exec, task);
+}
+
+/*
+ *  XXX jstultz: seems like rcu_assign_pointer above would also
+ *               work for this, but trying to match usage.
+ */
+static inline void rq_set_curr_rcu_init(struct rq *rq, struct task_struct *task)
+{
+	RCU_INIT_POINTER(rq->curr_exec, task);
+}
+
 #define cpu_rq(cpu)		(&per_cpu(runqueues, (cpu)))
 #define this_rq()		this_cpu_ptr(&runqueues)
 #define task_rq(p)		cpu_rq(task_cpu(p))
-#define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
+#define cpu_curr(cpu)		(rq_curr(cpu_rq(cpu)))
 #define raw_rq()		raw_cpu_ptr(&runqueues)
+
+static inline struct task_struct *cpu_curr_unlocked(int cpu)
+{
+	return rq_curr_unlocked(cpu_rq(cpu));
+}
 
 struct sched_group;
 #ifdef CONFIG_SCHED_CORE
@@ -2070,7 +2100,7 @@ static inline u64 global_rt_runtime(void)
 
 static inline int task_current(struct rq *rq, struct task_struct *p)
 {
-	return rq->curr == p;
+	return rq_curr(rq) == p;
 }
 
 static inline int task_on_cpu(struct rq *rq, struct task_struct *p)
@@ -2230,7 +2260,7 @@ struct sched_class {
 
 static inline void put_prev_task(struct rq *rq, struct task_struct *prev)
 {
-	WARN_ON_ONCE(rq->curr != prev);
+	WARN_ON_ONCE(rq_curr(rq) != prev);
 	prev->sched_class->put_prev_task(rq, prev);
 }
 
@@ -2311,7 +2341,7 @@ extern void set_cpus_allowed_common(struct task_struct *p, struct affinity_conte
 
 static inline struct task_struct *get_push_task(struct rq *rq)
 {
-	struct task_struct *p = rq->curr;
+	struct task_struct *p = rq_curr(rq);
 
 	lockdep_assert_rq_held(rq);
 
@@ -3193,7 +3223,7 @@ static inline bool sched_energy_enabled(void) { return false; }
  * The scheduler provides memory barriers required by membarrier between:
  * - prior user-space memory accesses and store to rq->membarrier_state,
  * - store to rq->membarrier_state and following user-space memory accesses.
- * In the same way it provides those guarantees around store to rq->curr.
+ * In the same way it provides those guarantees around store to rq_curr(rq).
  */
 static inline void membarrier_switch_mm(struct rq *rq,
 					struct mm_struct *prev_mm,

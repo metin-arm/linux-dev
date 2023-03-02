@@ -283,7 +283,7 @@ static int membarrier_global_expedited(void)
 		 * Skip the CPU if it runs a kernel thread which is not using
 		 * a task mm.
 		 */
-		p = rcu_dereference(cpu_rq(cpu)->curr);
+		p = cpu_curr_unlocked(cpu);
 		if (!p->mm)
 			continue;
 
@@ -355,7 +355,7 @@ static int membarrier_private_expedited(int flags, int cpu_id)
 		if (cpu_id >= nr_cpu_ids || !cpu_online(cpu_id))
 			goto out;
 		rcu_read_lock();
-		p = rcu_dereference(cpu_rq(cpu_id)->curr);
+		p = cpu_curr_unlocked(cpu_id);
 		if (!p || p->mm != mm) {
 			rcu_read_unlock();
 			goto out;
@@ -368,7 +368,7 @@ static int membarrier_private_expedited(int flags, int cpu_id)
 		for_each_online_cpu(cpu) {
 			struct task_struct *p;
 
-			p = rcu_dereference(cpu_rq(cpu)->curr);
+			p = cpu_curr_unlocked(cpu);
 			if (p && p->mm == mm)
 				__cpumask_set_cpu(cpu, tmpmask);
 		}
@@ -466,7 +466,7 @@ static int sync_runqueues_membarrier_state(struct mm_struct *mm)
 		struct rq *rq = cpu_rq(cpu);
 		struct task_struct *p;
 
-		p = rcu_dereference(rq->curr);
+		p = rq_curr_unlocked(rq);
 		if (p && p->mm == mm)
 			__cpumask_set_cpu(cpu, tmpmask);
 	}

@@ -273,7 +273,7 @@ void __sched_core_account_forceidle(struct rq *rq)
 
 	for_each_cpu(i, smt_mask) {
 		rq_i = cpu_rq(i);
-		p = rq_i->core_pick ?: rq_i->curr;
+		p = rq_i->core_pick ?: rq_curr(rq_i);
 
 		if (p == rq_i->idle)
 			continue;

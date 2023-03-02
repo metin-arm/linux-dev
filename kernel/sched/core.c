@@ -257,7 +257,7 @@ void sched_core_dequeue(struct rq *rq, struct task_struct *p, int flags)
 	 * and re-examine whether the core is still in forced idle state.
 	 */
 	if (!(flags & DEQUEUE_SAVE) && rq->nr_running == 1 &&
-	    rq->core->core_forceidle_count && rq->curr == rq->idle)
+	    rq->core->core_forceidle_count && rq_curr(rq) == rq->idle)
 		resched_curr(rq);
 }
 
@@ -703,7 +703,7 @@ static void update_rq_clock_task(struct rq *rq, s64 delta)
 
 	rq->prev_irq_time += irq_delta;
 	delta -= irq_delta;
-	psi_account_irqtime(rq->curr, irq_delta);
+	psi_account_irqtime(rq_curr(rq), irq_delta);
 #endif
 #ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
 	if (static_key_false((&paravirt_steal_rq_enabled))) {
@@ -773,7 +773,7 @@ static enum hrtimer_restart hrtick(struct hrtimer *timer)
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
-	rq->curr->sched_class->task_tick(rq, rq->curr, 1);
+	rq_curr(rq)->sched_class->task_tick(rq, rq_curr(rq), 1);
 	rq_unlock(rq, &rf);
 
 	return HRTIMER_NORESTART;
@@ -1020,7 +1020,7 @@ void wake_up_q(struct wake_q_head *head)
  */
 void resched_curr(struct rq *rq)
 {
-	struct task_struct *curr = rq->curr;
+	struct task_struct *curr = rq_curr(rq);
 	int cpu;
 
 	lockdep_assert_rq_held(rq);
@@ -2175,16 +2175,18 @@ static inline void check_class_changed(struct rq *rq, struct task_struct *p,
 
 void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
 {
-	if (p->sched_class == rq->curr->sched_class)
-		rq->curr->sched_class->check_preempt_curr(rq, p, flags);
-	else if (sched_class_above(p->sched_class, rq->curr->sched_class))
+	struct task_struct *curr = rq_curr(rq);
+
+	if (p->sched_class == curr->sched_class)
+		curr->sched_class->check_preempt_curr(rq, p, flags);
+	else if (sched_class_above(p->sched_class, curr->sched_class))
 		resched_curr(rq);
 
 	/*
 	 * A queue event has occurred, and we're going to schedule.  In
 	 * this case, we can save a useless back to back clock update.
 	 */
-	if (task_on_rq_queued(rq->curr) && test_tsk_need_resched(rq->curr))
+	if (task_on_rq_queued(curr) && test_tsk_need_resched(curr))
 		rq_clock_skip_update(rq);
 }
 
@@ -3859,11 +3861,11 @@ void wake_up_if_idle(int cpu)
 
 	rcu_read_lock();
 
-	if (!is_idle_task(rcu_dereference(rq->curr)))
+	if (!is_idle_task(rq_curr_unlocked(rq)))
 		goto out;
 
 	rq_lock_irqsave(rq, &rf);
-	if (is_idle_task(rq->curr))
+	if (is_idle_task(rq_curr(rq)))
 		resched_curr(rq);
 	/* Else CPU is not idle, do nothing here: */
 	rq_unlock_irqrestore(rq, &rf);
@@ -4388,7 +4390,7 @@ struct task_struct *cpu_curr_snapshot(int cpu)
 	struct task_struct *t;
 
 	smp_mb(); /* Pairing determined by caller's synchronization design. */
-	t = rcu_dereference(cpu_curr(cpu));
+	t = cpu_curr_unlocked(cpu);
 	smp_mb(); /* Pairing determined by caller's synchronization design. */
 	return t;
 }
@@ -5197,7 +5199,7 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	 * kernel thread and not issued an IPI. It is therefore possible to
 	 * schedule between user->kernel->user threads without passing though
 	 * switch_mm(). Membarrier requires a barrier after storing to
-	 * rq->curr, before returning to userspace, so provide them here:
+	 * rq_curr(rq), before returning to userspace, so provide them here:
 	 *
 	 * - a full memory barrier for {PRIVATE,GLOBAL}_EXPEDITED, implicitly
 	 *   provided by mmdrop(),
@@ -5280,7 +5282,7 @@ context_switch(struct rq *rq, struct task_struct *prev,
 		membarrier_switch_mm(rq, prev->active_mm, next->mm);
 		/*
 		 * sys_membarrier() requires an smp_mb() between setting
-		 * rq->curr / membarrier_switch_mm() and returning to userspace.
+		 * rq_curr(rq) / membarrier_switch_mm() and returning to userspace.
 		 *
 		 * The below provides this either through switch_mm(), or in
 		 * case 'prev->active_mm == next->mm' through
@@ -5564,7 +5566,7 @@ void scheduler_tick(void)
 {
 	int cpu = smp_processor_id();
 	struct rq *rq = cpu_rq(cpu);
-	struct task_struct *curr = rq->curr;
+	struct task_struct *curr = rq_curr(rq);
 	struct rq_flags rf;
 	unsigned long thermal_pressure;
 	u64 resched_latency;
@@ -5657,7 +5659,7 @@ static void sched_tick_remote(struct work_struct *work)
 		goto out_requeue;
 
 	rq_lock_irq(rq, &rf);
-	curr = rq->curr;
+	curr = rq_curr(rq);
 	if (cpu_is_offline(cpu))
 		goto out_unlock;
 
@@ -6201,7 +6203,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 		/* Did we break L1TF mitigation requirements? */
 		WARN_ON_ONCE(!cookie_match(next, rq_i->core_pick));
 
-		if (rq_i->curr == rq_i->core_pick) {
+		if (rq_curr(rq_i) == rq_i->core_pick) {
 			rq_i->core_pick = NULL;
 			continue;
 		}
@@ -6232,7 +6234,7 @@ static bool try_steal_cookie(int this, int that)
 	if (!cookie)
 		goto unlock;
 
-	if (dst->curr != dst->idle)
+	if (rq_curr(dst) != dst->idle)
 		goto unlock;
 
 	p = sched_core_find(src, cookie);
@@ -6240,7 +6242,7 @@ static bool try_steal_cookie(int this, int that)
 		goto unlock;
 
 	do {
-		if (p == src->core_pick || p == src->curr)
+		if (p == src->core_pick || p == rq_curr(src))
 			goto next;
 
 		if (!is_cpu_allowed(p, this))
@@ -6511,7 +6513,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 
 	cpu = smp_processor_id();
 	rq = cpu_rq(cpu);
-	prev = rq->curr;
+	prev = rq_curr(rq);
 
 	schedule_debug(prev, !!sched_mode);
 
@@ -6534,7 +6536,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 	 *     if (signal_pending_state())	    if (p->state & @state)
 	 *
 	 * Also, the membarrier system call requires a full memory barrier
-	 * after coming from user-space, before storing to rq->curr.
+	 * after coming from user-space, before storing to rq_curr().
 	 */
 	rq_lock(rq, &rf);
 	smp_mb__after_spinlock();
@@ -6593,14 +6595,14 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 	if (likely(prev != next)) {
 		rq->nr_switches++;
 		/*
-		 * RCU users of rcu_dereference(rq->curr) may not see
+		 * RCU users of rcu_dereference(rq_curr(rq)) may not see
 		 * changes to task_struct made by pick_next_task().
 		 */
-		RCU_INIT_POINTER(rq->curr, next);
+		rq_set_curr_rcu_init(rq, next);
 		/*
 		 * The membarrier system call requires each architecture
 		 * to have a full memory barrier after updating
-		 * rq->curr, before returning to user-space.
+		 * rq_curr(rq), before returning to user-space.
 		 *
 		 * Here are the schemes providing that barrier on the
 		 * various architectures:
@@ -7037,7 +7039,7 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	 * real need to boost.
 	 */
 	if (unlikely(p == rq->idle)) {
-		WARN_ON(p != rq->curr);
+		WARN_ON(p != rq_curr(rq));
 		WARN_ON(p->pi_blocked_on);
 		goto out_unlock;
 	}
@@ -7253,7 +7255,7 @@ int idle_cpu(int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
 
-	if (rq->curr != rq->idle)
+	if (rq_curr(rq) != rq->idle)
 		return 0;
 
 	if (rq->nr_running)
@@ -9154,7 +9156,7 @@ void __init init_idle(struct task_struct *idle, int cpu)
 	rcu_read_unlock();
 
 	rq->idle = idle;
-	rcu_assign_pointer(rq->curr, idle);
+	rq_set_curr(rq, idle);
 	idle->on_rq = TASK_ON_RQ_QUEUED;
 #ifdef CONFIG_SMP
 	idle->on_cpu = 1;
@@ -9328,7 +9330,7 @@ static DEFINE_PER_CPU(struct cpu_stop_work, push_work);
  */
 static void balance_push(struct rq *rq)
 {
-	struct task_struct *push_task = rq->curr;
+	struct task_struct *push_task = rq_curr(rq);
 
 	lockdep_assert_rq_held(rq);
 
