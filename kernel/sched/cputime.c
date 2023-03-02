@@ -994,7 +994,7 @@ u64 kcpustat_field(struct kernel_cpustat *kcpustat,
 		struct task_struct *curr;
 
 		rcu_read_lock();
-		curr = rcu_dereference(rq->curr);
+		curr = rq_curr_rcu(rq);
 		if (WARN_ON_ONCE(!curr)) {
 			rcu_read_unlock();
 			return cpustat[usage];
@@ -1081,7 +1081,7 @@ void kcpustat_cpu_fetch(struct kernel_cpustat *dst, int cpu)
 		struct task_struct *curr;
 
 		rcu_read_lock();
-		curr = rcu_dereference(rq->curr);
+		curr = rq_curr_rcu(rq);
 		if (WARN_ON_ONCE(!curr)) {
 			rcu_read_unlock();
 			*dst = *src;

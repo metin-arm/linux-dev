@@ -246,8 +246,8 @@ static void do_idle(void)
 	/*
 	 * If the arch has a polling bit, we maintain an invariant:
 	 *
-	 * Our polling bit is clear if we're not scheduled (i.e. if rq->curr !=
-	 * rq->idle). This means that, if rq->idle has the polling bit set,
+	 * Our polling bit is clear if we're not scheduled (i.e. if rq_curr(rq)
+	 * != rq->idle). This means that, if rq->idle has the polling bit set,
 	 * then setting need_resched is guaranteed to cause the CPU to
 	 * reschedule.
 	 */
