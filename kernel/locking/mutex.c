@@ -615,6 +615,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 	}
 
 	raw_spin_lock(&lock->wait_lock);
+	raw_spin_lock(&current->blocked_lock);
 	/*
 	 * After waiting to acquire the wait_lock, try again.
 	 */
@@ -676,6 +677,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 				goto err;
 		}
 
+		raw_spin_unlock(&current->blocked_lock);
 		raw_spin_unlock(&lock->wait_lock);
 		if (ww_ctx)
 			ww_ctx_wake(ww_ctx);
@@ -683,6 +685,8 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 
 		first = __mutex_waiter_is_first(lock, &waiter);
 
+		raw_spin_lock(&lock->wait_lock);
+		raw_spin_lock(&current->blocked_lock);
 		/*
 		 * Gets reset by ttwu_runnable().
 		 */
@@ -697,15 +701,28 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 			break;
 
 		if (first) {
+			bool acquired;
+
+			/*
+			 * XXX connoro: mutex_optimistic_spin() can schedule, so
+			 * we need to release these locks before calling it.
+			 * This needs refactoring though b/c currently we take
+			 * the locks earlier than necessary when proxy exec is
+			 * disabled and release them unnecessarily when it's
+			 * enabled. At a minimum, need to verify that releasing
+			 * blocked_lock here doesn't create any races.
+			 */
+			raw_spin_unlock(&current->blocked_lock);
+			raw_spin_unlock(&lock->wait_lock);
 			trace_contention_begin(lock, LCB_F_MUTEX | LCB_F_SPIN);
-			if (mutex_optimistic_spin(lock, ww_ctx, &waiter))
+			acquired = mutex_optimistic_spin(lock, ww_ctx, &waiter);
+			raw_spin_lock(&lock->wait_lock);
+			raw_spin_lock(&current->blocked_lock);
+			if (acquired)
 				break;
 			trace_contention_begin(lock, LCB_F_MUTEX);
 		}
-
-		raw_spin_lock(&lock->wait_lock);
 	}
-	raw_spin_lock(&lock->wait_lock);
 acquired:
 	__set_current_state(TASK_RUNNING);
 
@@ -732,6 +749,7 @@ skip_wait:
 	if (ww_ctx)
 		ww_mutex_lock_acquired(ww, ww_ctx);
 
+	raw_spin_unlock(&current->blocked_lock);
 	raw_spin_unlock(&lock->wait_lock);
 	if (ww_ctx)
 		ww_ctx_wake(ww_ctx);
@@ -744,6 +762,7 @@ err:
 	__mutex_remove_waiter(lock, &waiter);
 err_early_kill:
 	trace_contention_end(lock, ret);
+	raw_spin_unlock(&current->blocked_lock);
 	raw_spin_unlock(&lock->wait_lock);
 	debug_mutex_free_waiter(&waiter);
 	mutex_release(&lock->dep_map, ip);
