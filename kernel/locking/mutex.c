@@ -905,11 +905,13 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 {
 	struct task_struct *next = NULL;
 	DEFINE_WAKE_Q(wake_q);
-	unsigned long owner;
+	/* Always force HANDOFF for Proxy Exec for now. Revisit. */
+	unsigned long owner = MUTEX_FLAG_HANDOFF;
 	unsigned long flags;
 
 	mutex_release(&lock->dep_map, ip);
 
+#ifndef CONFIG_PROXY_EXEC
 	/*
 	 * Release the lock before (potentially) taking the spinlock such that
 	 * other contenders can get on with things ASAP.
@@ -932,10 +934,38 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 			return;
 		}
 	}
+#endif
 
 	raw_spin_lock_irqsave(&lock->wait_lock, flags);
 	debug_mutex_unlock(lock);
-	if (!list_empty(&lock->wait_list)) {
+
+#ifdef CONFIG_PROXY_EXEC
+	raw_spin_lock(&current->blocked_lock);
+	/*
+	 * If we have a task boosting us, and that task was boosting us through
+	 * this lock, hand the lock to that task, as that is the highest
+	 * waiter, as selected by the scheduling function.
+	 */
+	next = current->blocked_donor;
+	if (next) {
+		struct mutex *next_lock;
+
+		raw_spin_lock_nested(&next->blocked_lock, SINGLE_DEPTH_NESTING);
+		next_lock = next->blocked_on;
+		raw_spin_unlock(&next->blocked_lock);
+		if (next_lock != lock) {
+			next = NULL;
+		} else {
+			wake_q_add(&wake_q, next);
+			current->blocked_donor = NULL;
+		}
+	}
+#endif
+
+	/*
+	 * Failing that, pick any on the wait list.
+	 */
+	if (!next && !list_empty(&lock->wait_list)) {
 		/* get the first entry from the wait-list: */
 		struct mutex_waiter *waiter =
 			list_first_entry(&lock->wait_list,
@@ -951,6 +981,9 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 		__mutex_handoff(lock, next);
 
 	preempt_disable();
+#ifdef CONFIG_PROXY_EXEC
+	raw_spin_unlock(&current->blocked_lock);
+#endif
 	raw_spin_unlock_irqrestore(&lock->wait_lock, flags);
 
 	wake_up_q(&wake_q);
