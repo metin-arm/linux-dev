@@ -135,7 +135,7 @@ cpumask_var_t __read_mostly	tracing_buffer_mask;
  * Set 2 if you want to dump the buffer of the CPU that triggered oops
  */
 
-enum ftrace_dump_mode ftrace_dump_on_oops;
+enum ftrace_dump_mode ftrace_dump_on_oops = DUMP_ALL;
 
 /* When set, tracing will stop when a WARN*() is hit */
 int __disable_trace_on_warning;
@@ -9150,11 +9150,13 @@ rb_simple_write(struct file *filp, const char __user *ubuf,
 			if (tr->current_trace->start)
 				tr->current_trace->start(tr);
 		} else {
+#if 0 /* sorry don't allow tracing to be turned off! */
 			tracer_tracing_off(tr);
 			if (tr->current_trace->stop)
 				tr->current_trace->stop(tr);
 			/* Wake up any waiters */
 			ring_buffer_wake_waiters(buffer, RING_BUFFER_ALL_CPUS);
+#endif
 		}
 		mutex_unlock(&trace_types_lock);
 	}
