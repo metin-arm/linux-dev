@@ -6889,6 +6889,7 @@ proxy_migrate_task(struct rq *rq, struct task_struct *next,
 		   struct rq_flags *rf, struct task_struct *p,
 		   int that_cpu, bool curr_in_chain)
 {
+	int retry_count = 0;
 	struct rq *that_rq;
 	LIST_HEAD(migrate_list);
 
@@ -6971,6 +6972,7 @@ proxy_migrate_task(struct rq *rq, struct task_struct *next,
 	for (; p; p = p->blocked_donor) {
 		int wake_cpu = p->wake_cpu;
 
+		BUG_ON(retry_count++ > 30);
 		WARN_ON(p == rq->curr);
 
 		deactivate_task(rq, p, 0);
@@ -6988,6 +6990,7 @@ proxy_migrate_task(struct rq *rq, struct task_struct *next,
 		p->wake_cpu = wake_cpu;
 	}
 
+	retry_count = 0;
 	/*
 	 * XXX jstultz: Try to ensure we handle balance callbacks
 	 * before releasing the rq lock - needs review
@@ -7000,6 +7003,10 @@ proxy_migrate_task(struct rq *rq, struct task_struct *next,
 	raw_spin_rq_lock(that_rq);
 
 	while (!list_empty(&migrate_list)) {
+		if (retry_count++ > 30) {
+			trace_printk("JDB: %s BUG!!! migrate retry countv > 30\n", __func__);
+			BUG();
+		}
 		p = list_first_entry(&migrate_list, struct task_struct, blocked_entry);
 		list_del_init(&p->blocked_entry);
 
@@ -7102,6 +7109,7 @@ proxy(struct rq *rq, struct task_struct *next, struct rq_flags *rf)
 	bool curr_in_chain = false;
 	int this_cpu, that_cpu;
 	struct mutex *mutex;
+	int retry_count = 0;
 
 	this_cpu = cpu_of(rq);
 
@@ -7111,6 +7119,10 @@ proxy(struct rq *rq, struct task_struct *next, struct rq_flags *rf)
 	 * TODO: deadlock detection
 	 */
 	for (p = next; p->blocked_on; p = owner) {
+		if (retry_count++ > 20) {
+			trace_printk("JDB: BUG!! proxy() retry countv > 20!\n");
+			BUG();
+		}
 		mutex = p->blocked_on;
 		/* Something changed in the chain, pick_again */
 		if (!mutex)
@@ -7346,6 +7358,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 	bool proxied;
 	int cpu;
 	bool preserve_need_resched = false;
+	int retry_count = 0;
 
 	cpu = smp_processor_id();
 	rq = cpu_rq(cpu);
@@ -7443,6 +7456,11 @@ pick_again:
 			 * in rq_pin_lock
 			 */
 			__balance_callbacks(rq);
+
+			if (retry_count++ > 50) {
+				trace_printk("JDB: BUG!!! pick next retry_count > 50\n");
+				BUG();
+			}
 			goto pick_again;
 		}
 		/*

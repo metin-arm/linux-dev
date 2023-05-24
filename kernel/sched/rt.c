@@ -2143,6 +2143,7 @@ static int push_rt_task(struct rq *rq, bool pull)
 	struct task_struct *next_task;
 	struct rq *lowest_rq;
 	int ret = 0;
+	int retry_count = 0;
 
 	if (!rq->rt.overloaded)
 		return 0;
@@ -2152,6 +2153,7 @@ static int push_rt_task(struct rq *rq, bool pull)
 		return 0;
 
 retry:
+	BUG_ON(retry_count++ > 30);
 	/*
 	 * It's possible that the next_task slipped in of
 	 * higher priority than current. If that's the case
