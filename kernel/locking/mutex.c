@@ -680,8 +680,13 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 			bool acquired;
 
 			/*
-			 * mutex_optimistic_spin() can schedule, so  we need to
-			 * release these locks before calling it.
+			 * XXX connoro: mutex_optimistic_spin() can schedule, so
+			 * we need to release these locks before calling it.
+			 * This needs refactoring though b/c currently we take
+			 * the locks earlier than necessary when proxy exec is
+			 * disabled and release them unnecessarily when it's
+			 * enabled. At a minimum, need to verify that releasing
+			 * blocked_lock here doesn't create any races.
 			 */
 			raw_spin_unlock(&current->blocked_lock);
 			raw_spin_unlock_irqrestore(&lock->wait_lock, flags);
@@ -905,12 +910,21 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 {
 	struct task_struct *next = NULL;
 	DEFINE_WAKE_Q(wake_q);
-	/* Always force HANDOFF for Proxy Exec for now. Revisit. */
+	/*
+	 * XXX [juril] Proxy Exec forces always an HANDOFF (so that owner is
+	 * never empty when there are waiters waiting?). Should we make this
+	 * conditional on having proxy exec configured in?
+	 */
 	unsigned long owner = MUTEX_FLAG_HANDOFF;
 	unsigned long flags;
 
 	mutex_release(&lock->dep_map, ip);
 
+	/*
+	 * XXX must always handoff the mutex to avoid !owner in proxy().
+	 * scheduler delay is minimal since we hand off to the task that
+	 * is to be scheduled next.
+	 */
 #ifndef CONFIG_PROXY_EXEC
 	/*
 	 * Release the lock before (potentially) taking the spinlock such that
@@ -950,6 +964,10 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 	if (next) {
 		struct mutex *next_lock;
 
+		/*
+		 * jstultz:  get_task_blocked_on(next) seemed to be missing locking
+		 * so I've added it here (which required nesting the locks).
+		 */
 		raw_spin_lock_nested(&next->blocked_lock, SINGLE_DEPTH_NESTING);
 		next_lock = get_task_blocked_on(next);
 		raw_spin_unlock(&next->blocked_lock);
@@ -960,6 +978,12 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 			current->blocked_donor = NULL;
 		}
 	}
+
+	/*
+	 * XXX if there was no higher prio proxy, ->blocked_task will not have
+	 * been set.  Therefore lower prio contending tasks are serviced in
+	 * FIFO order.
+	 */
 #endif
 
 	/*
@@ -980,7 +1004,7 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 	if (owner & MUTEX_FLAG_HANDOFF)
 		__mutex_handoff(lock, next);
 
-	preempt_disable();
+	preempt_disable(); /* XXX connoro: why disable preemption here? */
 #ifdef CONFIG_PROXY_EXEC
 	raw_spin_unlock(&current->blocked_lock);
 #endif

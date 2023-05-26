@@ -8557,6 +8557,11 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 
 	lockdep_assert_rq_held(env->src_rq);
 
+	/*
+	 * XXX connoro: Is this correct, or should we be doing chain
+	 * balancing for CFS tasks too? Balancing chains that aren't
+	 * part of the running task's blocked "tree" seems reasonable?
+	 */
 	if (task_is_blocked(p))
 		return 0;
 
@@ -8610,6 +8615,10 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	/* Record that we found at least one task that could run on dst_cpu */
 	env->flags &= ~LBF_ALL_PINNED;
 
+	/*
+	 * XXX mutex unlock path may have marked proxy as unblocked allowing us to
+	 * reach this point, but we still shouldn't migrate it.
+	 */
 	if (task_on_cpu(env->src_rq, p) || task_current_selected(env->src_rq, p)) {
 		schedstat_inc(p->stats.nr_failed_migrations_running);
 		return 0;
@@ -12118,6 +12127,10 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 		entity_tick(cfs_rq, se, queued);
 	}
 
+	/*
+	 * XXX need to use execution context (rq->curr) for task_tick_numa and
+	 * update_misfit_status?
+	 */
 	if (static_branch_unlikely(&sched_numa_balancing))
 		task_tick_numa(rq, curr);
 

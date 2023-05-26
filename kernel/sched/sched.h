@@ -2282,6 +2282,7 @@ static inline void put_prev_task(struct rq *rq, struct task_struct *prev)
 {
 	WARN_ON_ONCE(rq->curr != prev && prev != rq_selected(rq));
 
+	/* XXX connoro: is this check necessary? */
 	if (prev == rq_selected(rq) && task_cpu(prev) != cpu_of(rq))
 		return;
 
@@ -2366,6 +2367,16 @@ extern void set_cpus_allowed_common(struct task_struct *p, struct affinity_conte
 
 static inline struct task_struct *get_push_task(struct rq *rq)
 {
+	/*
+	 * XXX connoro: should this be rq_selected?
+	 * When rq->curr != rq_selected(), pushing rq->curr alone means it
+	 * stops inheriting. Perhaps returning rq_selected() and pushing the
+	 * entire chain would be correct? OTOH if we are guaranteed that
+	 * rq_selected() is the highest prio task on the rq when
+	 * get_push_task() is called, then proxy() will migrate the rest of the
+	 * chain during the __schedule() call immediately after rq->curr is
+	 * pushed.
+	 */
 	struct task_struct *p = rq_selected(rq);
 
 	lockdep_assert_rq_held(rq);

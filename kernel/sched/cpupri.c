@@ -64,6 +64,7 @@ static int convert_prio(int prio)
 	return cpupri;
 }
 
+/* XXX connoro: the p passed in here should be exec ctx */
 static inline int __cpupri_find(struct cpupri *cp, struct task_struct *p,
 				struct cpumask *lowest_mask, int idx)
 {

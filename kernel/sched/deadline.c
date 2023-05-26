@@ -1854,6 +1854,10 @@ select_task_rq_dl(struct task_struct *p, int cpu, int flags)
 		select_rq |= !dl_task_fits_capacity(p, cpu);
 
 	if (select_rq) {
+		/*
+		 * XXX connoro: verify this but in wakeup path we should
+		 * always have unblocked p, so exec_ctx == sched_ctx == p.
+		 */
 		int target = find_later_rq(p, p);
 
 		if (target != -1 &&
@@ -2228,7 +2232,7 @@ next_node:
 		 * pushability.
 		 */
 		if (pushable_chain(rq, p, 0))
-			return p;
+			return p; /* XXX connoro TODO this is definitely wrong in combo with the later checks...*/
 
 		next_node = rb_next(next_node);
 		goto next_node;
@@ -2259,6 +2263,10 @@ static struct rq *find_lock_later_rq(struct task_struct *task, struct rq *rq)
 	for (tries = 0; tries < DL_MAX_TRIES; tries++) {
 		retry = false;
 		exec_ctx = find_exec_ctx(rq, task);
+		/*
+		 * XXX jstultz: double check: if we get null from find_exec_ctx,
+		 * is breaking the right thing?
+		 */
 		if (!exec_ctx)
 			break;
 
@@ -2283,6 +2291,7 @@ static struct rq *find_lock_later_rq(struct task_struct *task, struct rq *rq)
 		if (double_lock_balance(rq, later_rq)) {
 			bool fail = false;
 
+			/* XXX connoro: this is a mess. Surely there's a better way to express it...*/
 			if (!dl_task(task) || is_migration_disabled(task)) {
 				fail = true;
 			} else if (rq != this_rq()) {
@@ -2367,6 +2376,7 @@ retry:
 	get_task_struct(next_task);
 
 	/* Will lock the rq it'll find */
+	/* XXX connoro: update find_lock_later_rq() for split context? */
 	later_rq = find_lock_later_rq(next_task, rq);
 	if (!later_rq) {
 		struct task_struct *task;

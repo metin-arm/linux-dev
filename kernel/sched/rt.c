@@ -1649,6 +1649,9 @@ select_task_rq_rt(struct task_struct *p, int cpu, int flags)
 	       (curr->nr_cpus_allowed < 2 || selected->prio <= p->prio);
 
 	if (test || !rt_task_fits_capacity(p, cpu)) {
+		/* XXX connoro: double check this, but if we're waking p then
+		 * it is unblocked so exec_ctx == sched_ctx == p.
+		 */
 		int target = find_lowest_rq(p, p);
 
 		/*
@@ -1680,6 +1683,10 @@ static void check_preempt_equal_prio(struct rq *rq, struct task_struct *p)
 	/*
 	 * Current can't be migrated, useless to reschedule,
 	 * let's hope p can move out.
+	 */
+	/* XXX connoro: need to revise cpupri_find() to reflect the split
+	 * context since it should look at rq_selected() for priority but
+	 * rq->curr for affinity.
 	 */
 	if (rq->curr->nr_cpus_allowed == 1 ||
 	    !cpupri_find(&rq->rd->cpupri, rq_selected(rq), rq->curr, NULL))
@@ -1994,6 +2001,9 @@ static struct task_struct *pick_next_pushable_task(struct rq *rq)
 
 	BUG_ON(rq->cpu != task_cpu(push_task));
 	BUG_ON(task_current(rq, push_task) || task_current_selected(rq, push_task));
+	/*XXX connoro: this check is pointless for blocked push_task. */
+	/* BUG_ON(push_task->nr_cpus_allowed <= 1); */
+
 	BUG_ON(!task_on_rq_queued(push_task));
 	BUG_ON(!rt_task(push_task));
 
@@ -2041,7 +2051,7 @@ static struct rq *find_lock_lowest_rq(struct task_struct *task, struct rq *rq)
 			 * "migrate_disabled" and then got preempted, so we must
 			 * check the task migration disable flag here too.
 			 *
-			 * Releasing the rq lock means we need to re-check pushability.
+			 * XXX connoro: releasing the rq lock means we need to re-check pushability.
 			 * Some scenarios:
 			 * 1) If a migration from another CPU sent a task/chain to rq
 			 *    that made task newly unpushable by completing a chain
@@ -2053,7 +2063,7 @@ static struct rq *find_lock_lowest_rq(struct task_struct *task, struct rq *rq)
 			 *    result of find_lowest_rq() if our chain previously ended in a blocked
 			 *    task whose affinity we could ignore, but now ends in an unblocked
 			 *    task that can't run on lowest_rq.
-			 * 3) Race described at https://lore.kernel.org/all/1523536384-26781-2-git-send-email-huawei.libin@huawei.com/
+			 * 3) race described at https://lore.kernel.org/all/1523536384-26781-2-git-send-email-huawei.libin@huawei.com/
 			 *
 			 * Notes on these:
 			 * - Scenario #2 is properly handled by rerunning find_lowest_rq
@@ -2168,6 +2178,16 @@ retry:
 		 * Note that the stoppers are masqueraded as SCHED_FIFO
 		 * (cf. sched_set_stop_task()), so we can't rely on rt_task().
 		 */
+		/*
+		 * XXX connoro: seems like what we actually want here might be:
+		 * 1) Enforce that rq_selected() must be RT
+		 * 2) Revise find_lowest_rq() to handle split context, searching
+		 *    for an rq that can accommodate rq_selected()'s prio and
+		 *    rq->curr's affinity
+		 * 3) Send the whole chain to the new rq in push_cpu_stop()?
+		 * If #3 is needed, might be best to make a separate patch with
+		 * all the "chain-level load balancing" changes.
+		 */
 		if (rq_selected(rq)->sched_class != &rt_sched_class)
 			return 0;
 
@@ -2199,6 +2219,21 @@ retry:
 	get_task_struct(next_task);
 
 	/* find_lock_lowest_rq locks the rq if found */
+	/*
+	 * XXX connoro: find_lock_lowest_rq() likely also needs split context
+	 * support. This also needs to include something like an exec_ctx=NULL
+	 * case for when we push a blocked task whose lock owner is not on
+	 * this rq.
+	 */
+	/* XXX connoro: we might unlock the rq here. But it might be the case that
+	 * the unpushable set can only *grow* and not shrink? Hmmm
+	 * - load balancing should not pull anything from the active blocked tree
+	 * - rq->curr can't have made progress or released mutexes
+	 * - we can't have scheduled, right? Is preemption disabled here?
+	 * - however, suppose proxy() pushed a task or chain here that linked our chain
+	 *   into the active tree.
+	 */
+	/* XXX connoro: we need to pass in */
 	lowest_rq = find_lock_lowest_rq(next_task, rq);
 	if (!lowest_rq) {
 		struct task_struct *task;
@@ -2504,6 +2539,7 @@ static void pull_rt_task(struct rq *this_rq)
 			if (is_migration_disabled(p)) {
 				push_task = get_push_task(src_rq);
 			} else {
+				/* XXX connoro: need to do chain migration here. */
 				push_task_chain(src_rq, this_rq, p);
 				resched = true;
 			}
@@ -2518,6 +2554,14 @@ skip:
 		double_unlock_balance(this_rq, src_rq);
 
 		if (push_task) {
+			/*
+			 * can push_cpu_stop get away with following blocked_proxy
+			 * even though it's not following it from rq->curr?
+			 * I can't figure out if that's correct.
+			 * Ha! actually the trick is that get_push_task should return
+			 * the proxy!
+			 * So push_cpu_stop just follows blocked_on relations.
+			 */
 			raw_spin_rq_unlock(this_rq);
 			stop_one_cpu_nowait(src_rq->cpu, push_cpu_stop,
 					    push_task, &src_rq->push_work);
