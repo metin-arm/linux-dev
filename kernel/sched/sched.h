@@ -2166,6 +2166,20 @@ static inline int task_current_selected(struct rq *rq, struct task_struct *p)
 	return rq_selected(rq) == p;
 }
 
+#ifdef CONFIG_SCHED_PROXY_EXEC
+static inline bool task_is_blocked(struct task_struct *p)
+{
+	enum blocked_on_state_enum state = READ_ONCE(p->blocked_on_state);
+
+	return sched_proxy_exec() && !!p->blocked_on && state != BO_RUNNABLE;
+}
+#else /* !SCHED_PROXY_EXEC */
+static inline bool task_is_blocked(struct task_struct *)
+{
+	return false;
+}
+#endif /* SCHED_PROXY_EXEC */
+
 static inline int task_on_cpu(struct rq *rq, struct task_struct *p)
 {
 #ifdef CONFIG_SMP
