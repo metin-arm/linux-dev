@@ -2998,8 +2998,15 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 	struct set_affinity_pending my_pending = { }, *pending = NULL;
 	bool stop_pending, complete = false;
 
-	/* Can the task run on the task's current CPU? If so, we're done */
-	if (cpumask_test_cpu(task_cpu(p), &p->cpus_mask)) {
+	/*
+	 * Can the task run on the task's current CPU? If so, we're done
+	 *
+	 * We are also done if the task is selected, boosting a lock-
+	 * holding proxy, (and potentially has been migrated outside its
+	 * current or previous affinity mask)
+	 */
+	if (cpumask_test_cpu(task_cpu(p), &p->cpus_mask) ||
+	    (task_current_selected(rq, p) && !task_current(rq, p))) {
 		struct task_struct *push_task = NULL;
 
 		if ((flags & SCA_MIGRATE_ENABLE) &&
@@ -6637,6 +6644,150 @@ static bool proxy_deactivate(struct rq *rq, struct task_struct *next)
 }
 
 /*
+ * If the blocked-on relationship crosses CPUs, migrate @p to the
+ * owner's CPU.
+ *
+ * This is because we must respect the CPU affinity of execution
+ * contexts (owner) but we can ignore affinity for scheduling
+ * contexts (@p). So we have to move scheduling contexts towards
+ * potential execution contexts.
+ *
+ * Note: The owner can disappear, but simply migrate to @target_cpu
+ * and leave that CPU to sort things out.
+ */
+static struct task_struct *
+proxy_migrate_task(struct rq *rq, struct rq_flags *rf,
+		   struct task_struct *p, int target_cpu)
+{
+	struct rq *target_rq;
+	int wake_cpu;
+
+	lockdep_assert_rq_held(rq);
+	target_rq = cpu_rq(target_cpu);
+
+	/*
+	 * Since we're going to drop @rq, we have to put(@rq_selected) first,
+	 * otherwise we have a reference that no longer belongs to us. Use
+	 * @rq->idle to fill the void and make the next pick_next_task()
+	 * invocation happy.
+	 *
+	 * CPU0				CPU1
+	 *
+	 *				B mutex_lock(X)
+	 *
+	 * A mutex_lock(X) <- B
+	 * A __schedule()
+	 * A pick->A
+	 * A proxy->B
+	 * A migrate A to CPU1
+	 *				B mutex_unlock(X) -> A
+	 *				B __schedule()
+	 *				B pick->A
+	 *				B switch_to (A)
+	 *				A ... does stuff
+	 * A ... is still running here
+	 *
+	 *		* BOOM *
+	 */
+	put_prev_task(rq, rq_selected(rq));
+	rq_set_selected(rq, rq->idle);
+	set_next_task(rq, rq_selected(rq));
+	WARN_ON(p == rq->curr);
+
+	wake_cpu = p->wake_cpu;
+	deactivate_task(rq, p, 0);
+	set_task_cpu(p, target_cpu);
+	/*
+	 * Preserve p->wake_cpu, such that we can tell where it
+	 * used to run later.
+	 */
+	p->wake_cpu = wake_cpu;
+
+	rq_unpin_lock(rq, rf);
+	__balance_callbacks(rq);
+
+	raw_spin_rq_unlock(rq);
+	raw_spin_rq_lock(target_rq);
+
+	activate_task(target_rq, p, 0);
+	check_preempt_curr(target_rq, p, 0);
+
+	raw_spin_rq_unlock(target_rq);
+	raw_spin_rq_lock(rq);
+	rq_repin_lock(rq, rf);
+
+	return NULL; /* Retry task selection on _this_ CPU. */
+}
+
+/*
+ * Before actually running a task from __schedule(), double
+ * check the task(@next) is not one that was proxy-migrated
+ * to this cpu, and unable to actually run here.
+ *
+ * Unfortunately if we do need to migrate it back, we have
+ * to grab the task->pi_lock which requires us dropping the
+ * rq lock we currently hold.
+ */
+static inline bool proxy_return_migration(struct rq *rq, struct rq_flags *rf,
+					  struct task_struct *next)
+{
+	if (!sched_proxy_exec())
+		return false;
+
+	lockdep_assert_rq_held(rq);
+
+	if (next->blocked_on && next->blocked_on_state == BO_RUNNABLE) {
+		if (!is_cpu_allowed(next, cpu_of(rq))) {
+			struct rq *target_rq;
+			int cpu;
+
+			if (next == rq->curr) {
+				/* can't migrate curr, so return and let caller sort it */
+				return true;
+			}
+
+			put_prev_task(rq, rq_selected(rq));
+			rq_set_selected(rq, rq->idle);
+
+			/* First unpin & run balance callbacks */
+			rq_unpin_lock(rq, rf);
+			__balance_callbacks(rq);
+			/*
+			 * Drop the rq lock so we can get pi_lock,
+			 * then reaquire it again to figure out
+			 * where to send it.
+			 */
+			raw_spin_rq_unlock(rq);
+			raw_spin_lock(&next->pi_lock);
+			rq_lock(rq, rf);
+
+			cpu = select_task_rq(next, next->wake_cpu, WF_TTWU);
+
+			deactivate_task(rq, next, 0);
+			set_task_cpu(next, cpu);
+			target_rq = cpu_rq(cpu);
+
+			/* drop this rq lock and grab targte_rq's */
+			rq_unlock(rq, rf);
+			raw_spin_rq_lock(target_rq);
+
+			activate_task(target_rq, next, 0);
+			check_preempt_curr(target_rq, next, 0);
+
+			/* drop target_rq's lock and re-grab this' */
+			raw_spin_rq_unlock(target_rq);
+			raw_spin_rq_lock(rq);
+			rq_repin_lock(rq, rf);
+
+			raw_spin_unlock(&next->pi_lock);
+
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
  * Find who @next (currently blocked on a mutex) can proxy for.
  *
  * Follow the blocked-on relation:
@@ -6658,8 +6809,11 @@ find_proxy_task(struct rq *rq, struct task_struct *next, struct rq_flags *rf)
 	struct task_struct *owner = NULL;
 	struct task_struct *ret = NULL;
 	struct task_struct *p;
+	int this_cpu, that_cpu;
 	struct mutex *mutex;
-	int this_cpu = cpu_of(rq);
+	bool curr_in_chain = false;
+
+	this_cpu = cpu_of(rq);
 
 	/*
 	 * Follow blocked_on chain.
@@ -6690,6 +6844,9 @@ find_proxy_task(struct rq *rq, struct task_struct *next, struct rq_flags *rf)
 			goto out;
 		}
 
+		if (task_current(rq, p))
+			curr_in_chain = true;
+
 		owner = __mutex_owner(mutex);
 		if (!owner) {
 			ret = p;
@@ -6697,10 +6854,17 @@ find_proxy_task(struct rq *rq, struct task_struct *next, struct rq_flags *rf)
 		}
 
 		if (task_cpu(owner) != this_cpu) {
-			/* XXX Don't handle migrations yet */
-			if (!proxy_deactivate(rq, next))
-				ret = next;
-			goto out;
+			that_cpu = task_cpu(owner);
+			/*
+			 * @owner can disappear, simply migrate to @that_cpu and leave that CPU
+			 * to sort things out.
+			 */
+			raw_spin_unlock(&p->blocked_lock);
+			raw_spin_unlock(&mutex->wait_lock);
+			if (curr_in_chain)
+				return proxy_resched_idle(rq, next);
+
+			return proxy_migrate_task(rq, rf, p, that_cpu);
 		}
 
 		if (task_on_rq_migrating(owner)) {
@@ -6786,6 +6950,11 @@ static inline void proxy_tag_curr(struct rq *rq, struct task_struct *next)
 }
 
 #else /* SCHED_PROXY_EXEC */
+static inline bool proxy_return_migration(struct rq *, struct rq_flags *,
+					  struct task_struct *)
+{
+	return false;
+}
 
 static struct task_struct *
 find_proxy_task(struct rq *, struct task_struct *next, struct rq_flags *)
@@ -6907,6 +7076,14 @@ pick_again:
 		if (next == rq->idle && prev == rq->idle)
 			preserve_need_resched = true;
 	}
+	if (unlikely(proxy_return_migration(rq, &rf, next))) {
+		if (next != rq->curr)
+			goto pick_again;
+
+		rq_set_selected(rq, rq->idle);
+		set_tsk_need_resched(rq->idle);
+		next = rq->idle;
+	}
 
 	if (!preserve_need_resched)
 		clear_tsk_need_resched(prev);
@@ -7003,6 +7180,9 @@ static inline void sched_submit_work(struct task_struct *tsk)
 	 * already acquired.
 	 */
 	SCHED_WARN_ON(current->__state & TASK_RTLOCK_WAIT);
+
+	if (task_is_blocked(tsk))
+		return;
 
 	/*
 	 * If we are going to sleep and we have plugged IO queued,
