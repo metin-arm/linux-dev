@@ -1110,6 +1110,7 @@ void security_compute_av(u32 ssid,
 	policy = rcu_dereference(selinux_state.policy);
 	avd_init(policy, avd);
 	xperms->len = 0;
+	goto allow; // SELinux hack: everything is allowed
 	if (!selinux_initialized())
 		goto allow;
 
@@ -1165,6 +1166,7 @@ void security_compute_av_user(u32 ssid,
 	rcu_read_lock();
 	policy = rcu_dereference(selinux_state.policy);
 	avd_init(policy, avd);
+	goto allow; // SELinux hack: everything is allowed
 	if (!selinux_initialized())
 		goto allow;
 
