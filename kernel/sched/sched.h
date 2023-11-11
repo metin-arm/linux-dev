@@ -3567,7 +3567,25 @@ static inline void init_sched_mm_cid(struct task_struct *t) { }
 extern u64 avg_vruntime(struct cfs_rq *cfs_rq);
 extern int entity_eligible(struct cfs_rq *cfs_rq, struct sched_entity *se);
 #ifdef CONFIG_SMP
+
 struct task_struct *find_exec_ctx(struct rq *rq, struct task_struct *p);
+static inline
+void __push_task_chain(struct rq *rq, struct rq *dst_rq, struct task_struct *task)
+{
+	deactivate_task(rq, task, 0);
+	set_task_cpu(task, dst_rq->cpu);
+	activate_task(dst_rq, task, 0);
+}
+#ifdef CONFIG_SCHED_PROXY_EXEC
+void push_task_chain(struct rq *rq, struct rq *dst_rq, struct task_struct *task);
+#else
+static inline
+void push_task_chain(struct rq *rq, struct rq *dst_rq, struct task_struct *task)
+{
+	__push_task_chain(rq, dst_rq, task);
+}
+#endif
+int pushable_chain(struct rq *rq, struct task_struct *p, int cpu);
 #endif
 
 #endif /* _KERNEL_SCHED_SCHED_H */

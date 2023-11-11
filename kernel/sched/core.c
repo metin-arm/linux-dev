@@ -2738,9 +2738,7 @@ int push_cpu_stop(void *arg)
 
 	// XXX validate p is still the highest prio task
 	if (task_rq(p) == rq) {
-		deactivate_task(rq, p, 0);
-		set_task_cpu(p, lowest_rq->cpu);
-		activate_task(lowest_rq, p, 0);
+		push_task_chain(rq, lowest_rq, p);
 		resched_curr(lowest_rq);
 	}
 
@@ -3929,7 +3927,6 @@ struct task_struct *find_exec_ctx(struct rq *rq, struct task_struct *p)
 		return p;
 
 	lockdep_assert_rq_held(rq);
-
 	for (exec_ctx = p; task_is_blocked(exec_ctx) && !task_on_cpu(rq, exec_ctx);
 							exec_ctx = owner) {
 		mutex = exec_ctx->blocked_on;
@@ -3943,6 +3940,68 @@ struct task_struct *find_exec_ctx(struct rq *rq, struct task_struct *p)
 		}
 	}
 	return exec_ctx;
+}
+
+void push_task_chain(struct rq *rq, struct rq *dst_rq, struct task_struct *task)
+{
+	struct task_struct *owner;
+
+	lockdep_assert_rq_held(rq);
+	lockdep_assert_rq_held(dst_rq);
+
+	BUG_ON(!task_queued_on_rq(rq, task));
+	BUG_ON(task_current_selected(rq, task));
+
+	while (task) {
+		if (!task_queued_on_rq(rq, task) || task_current_selected(rq, task))
+			break;
+
+		if (task_is_blocked(task))
+			owner = __mutex_owner(task->blocked_on);
+		else
+			owner = NULL;
+		__push_task_chain(rq, dst_rq, task);
+		if (task == owner)
+			break;
+		task = owner;
+	}
+}
+
+/*
+ * Returns:
+ * 1 if chain is pushable and affinity does not prevent pushing to cpu
+ * 0 if chain is unpushable
+ * -1 if chain is pushable but affinity blocks running on cpu.
+ */
+int pushable_chain(struct rq *rq, struct task_struct *p, int cpu)
+{
+	struct task_struct *exec_ctx;
+
+	lockdep_assert_rq_held(rq);
+
+	if (task_rq(p) != rq || !task_on_rq_queued(p))
+		return 0;
+
+	exec_ctx = find_exec_ctx(rq, p);
+	/*
+	 * Chain leads off the rq, we're free to push it anywhere.
+	 *
+	 * One wrinkle with relying on find_exec_ctx is that when the chain
+	 * leads to a task currently migrating to rq, we see the chain as
+	 * pushable & push everything prior to the migrating task. Even if
+	 * we checked explicitly for this case, we could still race with a
+	 * migration after the check.
+	 * This shouldn't permanently produce a bad state though, as proxy()
+	 * will send the chain back to rq and by that point the migration
+	 * should be complete & a proper push can occur.
+	 */
+	if (!exec_ctx)
+		return 1;
+
+	if (task_on_cpu(rq, exec_ctx) || exec_ctx->nr_cpus_allowed <= 1)
+		return 0;
+
+	return cpumask_test_cpu(cpu, &exec_ctx->cpus_mask) ? 1 : -1;
 }
 
 static inline bool proxy_needs_return(struct rq *rq, struct task_struct *p)
@@ -3988,6 +4047,15 @@ static inline void activate_blocked_entities(struct rq *,
 struct task_struct *find_exec_ctx(struct rq *, struct task_struct *p)
 {
 	return p;
+}
+
+int pushable_chain(struct rq *rq, struct task_struct *p, int cpu)
+{
+	if (!task_on_cpu(rq, p) &&
+	    cpumask_test_cpu(cpu, &p->cpus_mask))
+		return 1;
+
+	return 0;
 }
 
 static inline bool proxy_needs_return(struct rq *, struct task_struct *)
