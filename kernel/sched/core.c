@@ -3817,15 +3817,19 @@ static inline bool proxy_needs_return(struct rq *rq, struct task_struct *p)
 	if (p->blocked_on_state == BO_WAKING) {
 		int cpu = cpu_of(rq);
 
+		raw_spin_lock(&p->blocked_lock);
 		if (!is_cpu_allowed(p, cpu)) {
-			update_rq_clock(rq);
 			if (task_current_selected(rq, p)) {
 				put_prev_task(rq, p);
 				rq_set_selected(rq, rq->idle);
 			}
-			deactivate_task(rq, p, 0);
+			deactivate_task(rq, p, DEQUEUE_SLEEP | DEQUEUE_NOCLOCK);
+			resched_curr(rq);
+			raw_spin_unlock(&p->blocked_lock);
 			return true;
 		}
+		resched_curr(rq);
+		raw_spin_unlock(&p->blocked_lock);
 	}
 	return false;
 }
