@@ -3802,6 +3802,40 @@ static inline void ttwu_do_wakeup(struct task_struct *p)
 	trace_sched_wakeup(p);
 }
 
+#ifdef CONFIG_SCHED_PROXY_EXEC
+static inline bool proxy_needs_return(struct rq *rq, struct task_struct *p)
+{
+	if (!sched_proxy_exec())
+		return false;
+
+	if (task_current(rq, p))
+		return false;
+
+	if (!p->blocked_on)
+		return false;
+
+	if (p->blocked_on_state == BO_WAKING) {
+		int cpu = cpu_of(rq);
+
+		if (!is_cpu_allowed(p, cpu)) {
+			update_rq_clock(rq);
+			if (task_current_selected(rq, p)) {
+				put_prev_task(rq, p);
+				rq_set_selected(rq, rq->idle);
+			}
+			deactivate_task(rq, p, 0);
+			return true;
+		}
+	}
+	return false;
+}
+#else /* CONFIG_SCHED_PROXY_EXEC */
+static inline bool proxy_needs_return(struct rq *, struct task_struct *)
+{
+	return false;
+}
+#endif /* CONFIG_SCHED_PROXY_EXEC */
+
 static void
 ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
 		 struct rq_flags *rf)
@@ -3897,9 +3931,12 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 			update_rq_clock(rq);
 			check_preempt_curr(rq, p, wake_flags);
 		}
+		if (proxy_needs_return(rq, p))
+			goto out;
 		ttwu_do_wakeup(p);
 		ret = 1;
 	}
+out:
 	__task_rq_unlock(rq, &rf);
 
 	return ret;
@@ -4241,6 +4278,7 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	int cpu, success = 0;
 
 	if (p == current) {
+		WARN_ON(task_is_blocked(p));
 		/*
 		 * We're waking current, this means 'p->on_rq' and 'task_cpu(p)
 		 * == smp_processor_id()'. Together this means we can special
@@ -6720,74 +6758,6 @@ proxy_migrate_task(struct rq *rq, struct rq_flags *rf,
 }
 
 /*
- * Before actually running a task from __schedule(), double
- * check the task(@next) is not one that was proxy-migrated
- * to this cpu, and unable to actually run here.
- *
- * Unfortunately if we do need to migrate it back, we have
- * to grab the task->pi_lock which requires us dropping the
- * rq lock we currently hold.
- */
-static inline bool proxy_return_migration(struct rq *rq, struct rq_flags *rf,
-					  struct task_struct *next)
-{
-	if (!sched_proxy_exec())
-		return false;
-
-	lockdep_assert_rq_held(rq);
-
-	if (next->blocked_on && next->blocked_on_state == BO_RUNNABLE) {
-		if (!is_cpu_allowed(next, cpu_of(rq))) {
-			struct rq *target_rq;
-			int cpu;
-
-			if (next == rq->curr) {
-				/* can't migrate curr, so return and let caller sort it */
-				return true;
-			}
-
-			put_prev_task(rq, rq_selected(rq));
-			rq_set_selected(rq, rq->idle);
-
-			/* First unpin & run balance callbacks */
-			rq_unpin_lock(rq, rf);
-			__balance_callbacks(rq);
-			/*
-			 * Drop the rq lock so we can get pi_lock,
-			 * then reaquire it again to figure out
-			 * where to send it.
-			 */
-			raw_spin_rq_unlock(rq);
-			raw_spin_lock(&next->pi_lock);
-			rq_lock(rq, rf);
-
-			cpu = select_task_rq(next, next->wake_cpu, WF_TTWU);
-
-			deactivate_task(rq, next, 0);
-			set_task_cpu(next, cpu);
-			target_rq = cpu_rq(cpu);
-
-			/* drop this rq lock and grab targte_rq's */
-			rq_unlock(rq, rf);
-			raw_spin_rq_lock(target_rq);
-
-			activate_task(target_rq, next, 0);
-			check_preempt_curr(target_rq, next, 0);
-
-			/* drop target_rq's lock and re-grab this' */
-			raw_spin_rq_unlock(target_rq);
-			raw_spin_rq_lock(rq);
-			rq_repin_lock(rq, rf);
-
-			raw_spin_unlock(&next->pi_lock);
-
-			return true;
-		}
-	}
-	return false;
-}
-
-/*
  * Find who @next (currently blocked on a mutex) can proxy for.
  *
  * Follow the blocked-on relation:
@@ -6950,12 +6920,6 @@ static inline void proxy_tag_curr(struct rq *rq, struct task_struct *next)
 }
 
 #else /* SCHED_PROXY_EXEC */
-static inline bool proxy_return_migration(struct rq *, struct rq_flags *,
-					  struct task_struct *)
-{
-	return false;
-}
-
 static struct task_struct *
 find_proxy_task(struct rq *, struct task_struct *next, struct rq_flags *)
 {
@@ -7075,14 +7039,6 @@ pick_again:
 		}
 		if (next == rq->idle && prev == rq->idle)
 			preserve_need_resched = true;
-	}
-	if (unlikely(proxy_return_migration(rq, &rf, next))) {
-		if (next != rq->curr)
-			goto pick_again;
-
-		rq_set_selected(rq, rq->idle);
-		set_tsk_need_resched(rq->idle);
-		next = rq->idle;
 	}
 
 	if (!preserve_need_resched)
