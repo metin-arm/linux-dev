@@ -4345,6 +4345,8 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 
 		ttwu_queue(p, cpu, wake_flags);
 	}
+	if (p->blocked_on_state == BO_WAKING)
+		p->blocked_on_state = BO_RUNNABLE;
 out:
 	if (success)
 		ttwu_stat(p, task_cpu(p), wake_flags);

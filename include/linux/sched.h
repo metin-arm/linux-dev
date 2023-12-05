@@ -740,6 +740,13 @@ struct kmap_ctrl {
 #endif
 };
 
+enum blocked_on_state_enum {
+	BO_UNBLOCKED,
+	BO_BLOCKED,
+	BO_WAKING,
+	BO_RUNNABLE,
+};
+
 struct task_struct {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	/*
@@ -1145,8 +1152,8 @@ struct task_struct {
 	struct rt_mutex_waiter		*pi_blocked_on;
 #endif
 
+	enum blocked_on_state_enum	blocked_on_state; /* blocked on state */
 	struct mutex			*blocked_on;	/* lock we're blocked on */
-	bool				blocked_on_waking; /* blocked on, but waking */
 	raw_spinlock_t			blocked_lock;
 
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP

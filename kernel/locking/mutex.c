@@ -624,7 +624,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 	}
 
 	current->blocked_on = lock;
-	current->blocked_on_waking = false;
+	current->blocked_on_state = BO_BLOCKED;
 	set_current_state(state);
 	trace_contention_begin(lock, LCB_F_MUTEX);
 	for (;;) {
@@ -670,9 +670,9 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 		raw_spin_lock(&current->blocked_lock);
 
 		/*
-		 * Clear blocked_on_waking flag set by the unlock path().
+		 * Re-set blocked_on_state set to BO_WAKING/RUNNING by the unlock path().
 		 */
-		current->blocked_on_waking = false;
+		current->blocked_on_state = BO_BLOCKED;
 		set_current_state(state);
 		/*
 		 * Here we order against unlock; we must either see it change
@@ -702,6 +702,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 	}
 acquired:
 	current->blocked_on = NULL;
+	current->blocked_on_state = BO_UNBLOCKED;
 	__set_current_state(TASK_RUNNING);
 
 	if (ww_ctx) {
@@ -734,6 +735,7 @@ skip_wait:
 
 err:
 	current->blocked_on = NULL;
+	current->blocked_on_state = BO_UNBLOCKED;
 	__set_current_state(TASK_RUNNING);
 	__mutex_remove_waiter(lock, &waiter);
 err_early_kill:
@@ -952,7 +954,7 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 		raw_spin_lock(&next->blocked_lock);
 		debug_mutex_wake_waiter(lock, waiter);
 		WARN_ON(next->blocked_on != lock);
-		next->blocked_on_waking = true;
+		next->blocked_on_state = BO_WAKING;
 		wake_q_add(&wake_q, next);
 		raw_spin_unlock(&next->blocked_lock);
 	}
