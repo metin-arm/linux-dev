@@ -8832,7 +8832,6 @@ static void detach_task(struct task_struct *p, struct lb_env *env)
 {
 	lockdep_assert_rq_held(env->src_rq);
 
-	BUG_ON(task_is_blocked(p));
 	BUG_ON(task_current(env->src_rq, p));
 	BUG_ON(task_current_selected(env->src_rq, p));
 
