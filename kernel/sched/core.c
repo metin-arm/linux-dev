@@ -3852,6 +3852,7 @@ static void activate_blocked_entities(struct rq *target_rq,
 	while (!list_empty(&owner->blocked_head)) {
 		struct task_struct *pp;
 		unsigned int state;
+		unsigned int wake_cpu;
 
 		pp = list_first_entry(&owner->blocked_head,
 				      struct task_struct,
@@ -3882,7 +3883,10 @@ static void activate_blocked_entities(struct rq *target_rq,
 			continue;
 		}
 
+		/* Preserve wake_cpu */
+		wake_cpu = pp->wake_cpu;
 		__set_task_cpu(pp, target_cpu);
+		pp->wake_cpu = wake_cpu;
 
 		rq_lock_irqsave(target_rq, &rf);
 		update_rq_clock(target_rq);
