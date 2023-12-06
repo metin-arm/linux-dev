@@ -3811,10 +3811,7 @@ static inline bool proxy_needs_return(struct rq *rq, struct task_struct *p)
 	if (task_current(rq, p))
 		return false;
 
-	if (!p->blocked_on)
-		return false;
-
-	if (p->blocked_on_state == BO_WAKING) {
+	if (p->blocked_on && p->blocked_on_state == BO_WAKING) {
 		int cpu = cpu_of(rq);
 
 		raw_spin_lock(&p->blocked_lock);
