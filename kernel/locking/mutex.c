@@ -702,7 +702,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 	}
 acquired:
 	current->blocked_on = NULL;
-	current->blocked_on_state = BO_UNBLOCKED;
+	current->blocked_on_state = BO_RUNNABLE;
 	__set_current_state(TASK_RUNNING);
 
 	if (ww_ctx) {
@@ -735,7 +735,7 @@ skip_wait:
 
 err:
 	current->blocked_on = NULL;
-	current->blocked_on_state = BO_UNBLOCKED;
+	current->blocked_on_state = BO_RUNNABLE;
 	__set_current_state(TASK_RUNNING);
 	__mutex_remove_waiter(lock, &waiter);
 err_early_kill:

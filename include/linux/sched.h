@@ -741,10 +741,9 @@ struct kmap_ctrl {
 };
 
 enum blocked_on_state_enum {
-	BO_UNBLOCKED,
+	BO_RUNNABLE,
 	BO_BLOCKED,
 	BO_WAKING,
-	BO_RUNNABLE,
 };
 
 struct task_struct {
