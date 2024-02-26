@@ -60,7 +60,7 @@ atomic_t ball_pos;
 unsigned int players_per_team;
 bool game_over;
 
-#if CONFIG_SCHED_PROXY_EXEC
+#ifdef CONFIG_SCHED_PROXY_EXEC
 struct mutex *mutex_low_list;
 struct mutex *mutex_mid_list;
 #define test_lock_init(x)	mutex_init(x)
