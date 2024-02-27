@@ -1685,7 +1685,7 @@ static inline pid_t task_pgrp_nr(struct task_struct *tsk)
 DECLARE_STATIC_KEY_TRUE(__sched_proxy_exec);
 static inline bool sched_proxy_exec(void)
 {
-	return static_branch_likely(&__sched_proxy_exec);
+	return true;
 }
 #else
 static inline bool sched_proxy_exec(void)
